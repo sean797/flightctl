@@ -460,6 +460,48 @@ func TestCollect_AllDisabled(t *testing.T) {
 
 }
 
+func TestLoadCustomInfoScriptsNeitherDirExists(t *testing.T) {
+	require := require.New(t)
+	tmpDir := t.TempDir()
+	rw := fileio.NewReadWriter(
+		fileio.NewReader(fileio.WithReaderRootDir(tmpDir)),
+		fileio.NewWriter(fileio.WithWriterRootDir(tmpDir)),
+	)
+	_, err := loadCustomInfoScripts(rw)
+	require.Error(err)
+	require.Contains(err.Error(), "neither custom info directory")
+}
+
+func TestLoadCustomInfoScriptsUserOverrides(t *testing.T) {
+	require := require.New(t)
+	tmpDir := t.TempDir()
+	rw := fileio.NewReadWriter(
+		fileio.NewReader(fileio.WithReaderRootDir(tmpDir)),
+		fileio.NewWriter(fileio.WithWriterRootDir(tmpDir)),
+	)
+	require.NoError(rw.MkdirAll(config.SystemInfoCustomScriptDir, fileio.DefaultDirectoryPermissions))
+	require.NoError(rw.MkdirAll(config.SystemInfoCustomScriptDirUser, fileio.DefaultDirectoryPermissions))
+	require.NoError(rw.WriteFile(
+		filepath.Join(config.SystemInfoCustomScriptDir, "site"),
+		generateScriptBytes(0, "from-usr-lib", 0),
+		fileio.DefaultExecutablePermissions,
+	))
+	require.NoError(rw.WriteFile(
+		filepath.Join(config.SystemInfoCustomScriptDirUser, "site"),
+		generateScriptBytes(0, "from-etc", 0),
+		fileio.DefaultExecutablePermissions,
+	))
+
+	log := log.NewPrefixLogger("test")
+	exec := executer.NewCommonExecuter()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	details, err := getCustomInfoMap(ctx, log, []string{"site"}, rw, exec)
+	require.NoError(err)
+	require.Equal("from-etc", details["site"], "user dir /etc should override /usr/lib for same script name")
+}
+
 func TestGetCustomInfoContextTimeout(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -501,11 +543,11 @@ func TestGetCustomInfoContextTimeout(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			defer cancel()
 
-			entries, err := rw.ReadDir(config.SystemInfoCustomScriptDir)
+			scriptPathByName, err := loadCustomInfoScripts(rw)
 			require.NoError(err)
 
 			start := time.Now()
-			value, err := getCustomInfoValue(ctx, "slowScript", rw, exec, entries)
+			value, err := getCustomInfoValue(ctx, "slowScript", exec, scriptPathByName)
 			elapsed := time.Since(start)
 
 			require.Less(elapsed, 200*time.Millisecond, "timeout quickly")

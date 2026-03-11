@@ -5,6 +5,7 @@ When the `flightctl-agent` starts, it reads its configuration from `/etc/flightc
 * `/etc/flightctl/conf.d/`: Drop-in directory for the agent configuration.
 * `/etc/flightctl/hooks.d/`: Drop-in directory for device lifecycle hooks. Overrides hooks of the same name under `/usr/lib/flightctl/hooks.d`.
 * `/usr/lib/flightctl/hooks.d/`: Drop-in directory for device lifecycle hooks.
+* `/etc/flightctl/custom-info.d/`: Drop-in directory for custom system info collectors. Overrides scripts of the same name under `/usr/lib/flightctl/custom-info.d`.
 * `/usr/lib/flightctl/custom-info.d/`: Drop-in directory for custom system info collectors.
 
 To preserve logs across reboots for debugging rollback issues, see [systemd Journal Service Configuration](configuring-device-greenboot.md#the-systemd-journal-service-configuration).
@@ -134,10 +135,10 @@ You can specify custom system info collectors that the agent calls and whose out
 
 To add a key `myInfo`,
 
-1. add an executable with that name to `/usr/lib/flightctl/custom-info.d/` that when it is executed returns the desired value, and
+1. add an executable with that name to `/usr/lib/flightctl/custom-info.d/` or `/etc/flightctl/custom-info.d/` (the latter overrides the former for the same script name) that when executed returns the desired value, and
 2. enable the collection and reporting of this info by adding the key `myInfo` to the agent's `config.yaml` under the `system-info-custom` configuration parameter.
 
-For example, to have the agent report the system's [FIPS](https://en.wikipedia.org/wiki/FIPS_140-2) mode status, create a file `/usr/lib/flightctl/custom-info.d/fips` with the following content and "executable" file permissions:
+For example, to have the agent report the system's [FIPS](https://en.wikipedia.org/wiki/FIPS_140-2) mode status, create a file in `/usr/lib/flightctl/custom-info.d/` or `/etc/flightctl/custom-info.d/` named `fips` with the following content and "executable" file permissions:
 
 ```bash
 #!/bin/sh

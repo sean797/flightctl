@@ -46,8 +46,10 @@ const (
 	DefaultConfigFile = DefaultConfigDir + "/config.yaml"
 	// DefaultDataDir is the default directory where the device's data is stored
 	DefaultDataDir = "/var/lib/flightctl"
-	// SystemInfoCustomScriptDir is the directory where custom system info scripts are stored.
+	// SystemInfoCustomScriptDir is the read-only directory where custom system info scripts are stored.
 	SystemInfoCustomScriptDir = "/usr/lib/flightctl/custom-info.d"
+	// SystemInfoCustomScriptDirUser is the user-writable directory; scripts here override same-named ones in SystemInfoCustomScriptDir.
+	SystemInfoCustomScriptDirUser = "/etc/flightctl/custom-info.d"
 	// DefaultCertsDir is the default directory where the device's certificates are stored
 	DefaultCertsDirName = "certs"
 	// DefaultManagementEndpoint is the default address of the device management server

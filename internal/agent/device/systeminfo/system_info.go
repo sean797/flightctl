@@ -3,7 +3,7 @@ package systeminfo
 import (
 	"context"
 	"fmt"
-	"io/fs"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -696,8 +696,9 @@ func getSystemInfoMap(ctx context.Context, log *log.PrefixLogger, info *Info, in
 	return infoMap
 }
 
-// getCustomInfoMap collects custom information from the system It executes
-// custom scripts located in the CustomInfoScriptDir directory and returns the
+// getCustomInfoMap collects custom information from the system. It executes
+// custom scripts from SystemInfoCustomScriptDir and SystemInfoCustomScriptDirUser
+// (user-writable overrides same-named scripts in read-only) and returns the
 // output as a map of key-value pairs.
 func getCustomInfoMap(ctx context.Context, log *log.PrefixLogger, keys []string, reader fileio.Reader, exec executer.Executer, opts ...CollectOpt) (map[string]string, error) {
 	cfg := &collectCfg{}
@@ -705,32 +706,22 @@ func getCustomInfoMap(ctx context.Context, log *log.PrefixLogger, keys []string,
 		opt(cfg)
 	}
 
-	exists, err := reader.PathExists(config.SystemInfoCustomScriptDir)
-	if err != nil {
-		return nil, err
-	}
-	if !exists {
-		return nil, fmt.Errorf("custom info directory %q does not exist", config.SystemInfoCustomScriptDir)
-	}
-
-	entries, err := os.ReadDir(reader.PathFor(config.SystemInfoCustomScriptDir))
+	scriptPathByName, err := loadCustomInfoScripts(reader)
 	if err != nil {
 		return nil, err
 	}
 
 	if cfg.collectAllCustom {
-		// discover all available scripts dynamically
-		keys = discoverKeysFromEntries(entries)
+		keys = discoverKeysFromNames(maps.Keys(scriptPathByName))
 	}
 
 	customInfoinfo := make(map[string]string, len(keys))
 	for _, key := range keys {
 		if ctx.Err() != nil {
-			// return what was collected
 			return customInfoinfo, nil
 		}
 
-		val, err := getCustomInfoValue(ctx, key, reader, exec, entries)
+		val, err := getCustomInfoValue(ctx, key, exec, scriptPathByName)
 		if err != nil {
 			if errors.IsContext(err) {
 				log.Warnf("Custom info script '%s' timed out", key)
@@ -741,40 +732,77 @@ func getCustomInfoMap(ctx context.Context, log *log.PrefixLogger, keys []string,
 
 		_, ok := customInfoinfo[key]
 		if ok {
-			// skip if the key already exists
 			log.Warnf("Custom info key %s already exists, skipping", key)
 			continue
 		}
 
-		// empty value is not an error
 		customInfoinfo[key] = val
 	}
 
 	return customInfoinfo, nil
 }
 
-// getCustomInfo takes a
-//
-// It supports multiple filename patterns based on a hostname:
-//   - myCustomInfo.sh
-//   - mycustominfo.sh
-//   - 01-mycustominfo.sh
-//   - 20-mycustominfo.pyp
-func getCustomInfoValue(ctx context.Context, key string, reader fileio.Reader, exec executer.Executer, entries []fs.DirEntry) (string, error) {
+// loadCustomInfoScripts reads both custom-info.d directories and returns a map
+// of script filename -> full path. User-writable dir (/etc) overrides same-named
+// scripts in the read-only dir (/usr/lib). At least one directory must exist.
+func loadCustomInfoScripts(reader fileio.Reader) (map[string]string, error) {
+	dirs := []string{config.SystemInfoCustomScriptDir, config.SystemInfoCustomScriptDirUser}
+	scriptPathByName := make(map[string]string)
+
+	var lastErr error
+	for _, dir := range dirs {
+		exists, err := reader.PathExists(dir)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if !exists {
+			continue
+		}
+		pathPrefix := reader.PathFor(dir)
+		entries, err := os.ReadDir(pathPrefix)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			scriptPath := filepath.Join(pathPrefix, name)
+			info, err := os.Stat(scriptPath)
+			if err != nil || info.IsDir() || info.Mode()&0111 == 0 {
+				continue
+			}
+			scriptPathByName[name] = scriptPath
+		}
+	}
+
+	if len(scriptPathByName) == 0 {
+		exists1, _ := reader.PathExists(config.SystemInfoCustomScriptDir)
+		exists2, _ := reader.PathExists(config.SystemInfoCustomScriptDirUser)
+		if !exists1 && !exists2 {
+			return nil, fmt.Errorf("neither custom info directory %q nor %q exists", config.SystemInfoCustomScriptDir, config.SystemInfoCustomScriptDirUser)
+		}
+	}
+	if lastErr != nil && len(scriptPathByName) == 0 {
+		return nil, lastErr
+	}
+	return scriptPathByName, nil
+}
+
+// getCustomInfoValue finds scripts in scriptPathByName that match key (exact or
+// prefix-numbered name) and runs the first executable one. It supports multiple
+// filename patterns: myCustomInfo.sh, 01-mycustominfo.sh, etc.
+func getCustomInfoValue(ctx context.Context, key string, exec executer.Executer, scriptPathByName map[string]string) (string, error) {
 	var candidates []string
 	keyLower := strings.ToLower(key)
 
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-
-		name := entry.Name()
+	for name := range scriptPathByName {
 		base := strings.TrimSuffix(name, filepath.Ext(name))
 		baseLower := strings.ToLower(base)
 
-		// match exact key or prefix + "-" + key
-		// intentionally not using regex to avoid performance cost
 		if base == key || baseLower == keyLower ||
 			strings.HasSuffix(base, "-"+key) || strings.HasSuffix(baseLower, "-"+keyLower) {
 			candidates = append(candidates, name)
@@ -785,11 +813,10 @@ func getCustomInfoValue(ctx context.Context, key string, reader fileio.Reader, e
 		return "", nil
 	}
 
-	// lexicographically sort the candidates
 	sort.Strings(candidates)
 
 	for _, name := range candidates {
-		scriptPath := filepath.Join(reader.PathFor(config.SystemInfoCustomScriptDir), name)
+		scriptPath := scriptPathByName[name]
 
 		info, err := os.Stat(scriptPath)
 		if err != nil || info.IsDir() || info.Mode()&0111 == 0 {
@@ -807,23 +834,17 @@ func getCustomInfoValue(ctx context.Context, key string, reader fileio.Reader, e
 	return "", nil
 }
 
-// discoverCustomInfoKeys discovers all available custom info keys from the
-// entries in the CustomInfoScriptDir directory. It returns a slice of keys.
-func discoverKeysFromEntries(entries []fs.DirEntry) []string {
-	keys := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-
-		name := entry.Name()
+// discoverKeysFromNames derives custom info keys (base names without extension)
+// from script filenames. Duplicate base names are not deduplicated; callers
+// that need unique keys can do so when consuming.
+func discoverKeysFromNames(names []string) []string {
+	keys := make([]string, 0, len(names))
+	for _, name := range names {
 		base := strings.TrimSuffix(name, filepath.Ext(name))
-
 		if base != "" {
 			keys = append(keys, base)
 		}
 	}
-
 	return keys
 }
 
